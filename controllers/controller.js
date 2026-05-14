@@ -1,4 +1,5 @@
 const Groq = require("groq-sdk");
+const similarity = require("../utils/similarity");
 
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
@@ -14,20 +15,19 @@ exports.evaluate = async (req, res) => {
       });
     }
 
-    // ===============================
-    // COUNT TUTOR TRANSCRIPT WORDS
-    // ===============================
+    // =========================================
+    // TUTOR WORD COUNT
+    // =========================================
 
     const tutorWordCount =
       tutorText.split(/\s+/).length;
 
-    // APPROXIMATE LINE ESTIMATION
     const estimatedLines =
       Math.max(5, Math.ceil(tutorWordCount / 10));
 
-    // ===============================
-    // GENERATE SAME-SIZED AI CONTENT
-    // ===============================
+    // =========================================
+    // GENERATE AI REFERENCE
+    // =========================================
 
     const aiResponse =
       await groq.chat.completions.create({
@@ -40,12 +40,11 @@ exports.evaluate = async (req, res) => {
             content: `
 Explain "${topic}" in educational format.
 
-IMPORTANT RULES:
-- Keep explanation approximately ${estimatedLines} lines.
-- Keep word count close to ${tutorWordCount} words.
-- Cover important concepts naturally.
-- Do not make response too short or too detailed.
-- Match tutor explanation size fairly.
+IMPORTANT:
+- Keep explanation around ${estimatedLines} lines.
+- Keep explanation close to ${tutorWordCount} words.
+- Include important concepts naturally.
+- Keep explanation balanced and fair.
 `,
           },
         ],
@@ -54,9 +53,16 @@ IMPORTANT RULES:
     const reference =
       aiResponse.choices[0].message.content;
 
-    // ===============================
+    // =========================================
+    // MATHEMATICAL BASE SCORE
+    // =========================================
+
+    const mathematicalScore =
+      similarity(reference, tutorText);
+
+    // =========================================
     // AI ANALYSIS
-    // ===============================
+    // =========================================
 
     const analysisResponse =
       await groq.chat.completions.create({
@@ -69,26 +75,31 @@ IMPORTANT RULES:
             content: `
 You are an expert educational evaluator.
 
-Compare the Tutor explanation against the AI reference.
+Evaluate how well the tutor explanation matches the AI reference.
 
-VERY IMPORTANT SCORING RULES:
-- Give realistic score.
-- Penalize missing concepts.
-- Penalize irrelevant explanation.
+SCORING RULES:
+- Score MUST be between 0 and 100.
+- NEVER return decimal values like 0.7.
+- 0 = completely irrelevant
+- 100 = nearly perfect explanation
+- Penalize missing concepts heavily.
 - Reward conceptual similarity.
-- Reward topic coverage.
-- Do not give high score for partial answers.
+- Reward completeness.
+- Reward accurate topic coverage.
 
-Reference:
+Mathematical similarity baseline:
+${mathematicalScore}
+
+REFERENCE:
 ${reference}
 
-Tutor:
+TUTOR:
 ${tutorText}
 
-Return ONLY VALID JSON.
+Return ONLY VALID JSON:
 
 {
-  "score": number,
+  "score": 0,
   "accuracy": "",
   "matched_concepts": [],
   "missing_concepts": [],
@@ -100,9 +111,9 @@ Return ONLY VALID JSON.
         ],
       });
 
-    // ===============================
-    // CLEAN JSON RESPONSE
-    // ===============================
+    // =========================================
+    // CLEAN RESPONSE
+    // =========================================
 
     let raw =
       analysisResponse.choices[0].message.content;
@@ -117,18 +128,47 @@ Return ONLY VALID JSON.
       analysis = JSON.parse(raw);
     } catch (e) {
       analysis = {
-        score: 0,
-        accuracy: "unknown",
+        score: mathematicalScore,
+        accuracy: "medium",
         matched_concepts: [],
         missing_concepts: [],
         extra_points: [],
-        feedback: raw,
+        feedback:
+          "AI response parsing failed.",
       };
     }
 
-    // ===============================
-    // FINAL RESPONSE
-    // ===============================
+    // =========================================
+    // FIX DECIMAL SCORE ISSUE
+    // =========================================
+
+    let aiScore = Number(analysis.score);
+
+    // If AI gives 0.7 → convert to 70
+    if (aiScore <= 1) {
+      aiScore = aiScore * 100;
+    }
+
+    // Clamp
+    aiScore = Math.max(
+      0,
+      Math.min(100, aiScore)
+    );
+
+    // =========================================
+    // HYBRID FINAL SCORE
+    // =========================================
+
+    const finalScore = Math.round(
+      (aiScore * 0.7) +
+      (mathematicalScore * 0.3)
+    );
+
+    analysis.score = finalScore;
+
+    // =========================================
+    // RESPONSE
+    // =========================================
 
     res.json({
       reference,

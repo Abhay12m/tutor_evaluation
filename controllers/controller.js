@@ -1,5 +1,4 @@
 const Groq = require("groq-sdk");
-const similarity = require("../utils/similarity");
 
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
@@ -9,39 +8,76 @@ exports.evaluate = async (req, res) => {
   try {
     const { topic, tutorText } = req.body;
 
-    // STEP 1: Generate AI reference
-    const aiResponse = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        {
-          role: "user",
-          content: `Explain ${topic} in educational format with important concepts.`,
-        },
-      ],
-    });
+    if (!topic || !tutorText) {
+      return res.status(400).json({
+        error: "Missing topic or transcript",
+      });
+    }
+
+    // ===============================
+    // COUNT TUTOR TRANSCRIPT WORDS
+    // ===============================
+
+    const tutorWordCount =
+      tutorText.split(/\s+/).length;
+
+    // APPROXIMATE LINE ESTIMATION
+    const estimatedLines =
+      Math.max(5, Math.ceil(tutorWordCount / 10));
+
+    // ===============================
+    // GENERATE SAME-SIZED AI CONTENT
+    // ===============================
+
+    const aiResponse =
+      await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+
+        messages: [
+          {
+            role: "user",
+
+            content: `
+Explain "${topic}" in educational format.
+
+IMPORTANT RULES:
+- Keep explanation approximately ${estimatedLines} lines.
+- Keep word count close to ${tutorWordCount} words.
+- Cover important concepts naturally.
+- Do not make response too short or too detailed.
+- Match tutor explanation size fairly.
+`,
+          },
+        ],
+      });
 
     const reference =
       aiResponse.choices[0].message.content;
 
-    // STEP 2: Similarity score
-    const score = similarity(reference, tutorText);
+    // ===============================
+    // AI ANALYSIS
+    // ===============================
 
-    // STEP 3: Detailed analysis
     const analysisResponse =
       await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
+
         messages: [
           {
             role: "user",
+
             content: `
 You are an expert educational evaluator.
 
 Compare the Tutor explanation against the AI reference.
 
-IMPORTANT:
-- Give REALISTIC scoring.
-- Penalize missing concepts heavily.
-- Do NOT give high scores for partial explanations.
+VERY IMPORTANT SCORING RULES:
+- Give realistic score.
+- Penalize missing concepts.
+- Penalize irrelevant explanation.
+- Reward conceptual similarity.
+- Reward topic coverage.
+- Do not give high score for partial answers.
 
 Reference:
 ${reference}
@@ -49,7 +85,7 @@ ${reference}
 Tutor:
 ${tutorText}
 
-Return ONLY VALID JSON:
+Return ONLY VALID JSON.
 
 {
   "score": number,
@@ -64,10 +100,13 @@ Return ONLY VALID JSON:
         ],
       });
 
+    // ===============================
+    // CLEAN JSON RESPONSE
+    // ===============================
+
     let raw =
       analysisResponse.choices[0].message.content;
 
-    // REMOVE ```json
     raw = raw.replace(/```json/g, "");
     raw = raw.replace(/```/g, "");
     raw = raw.trim();
@@ -78,17 +117,20 @@ Return ONLY VALID JSON:
       analysis = JSON.parse(raw);
     } catch (e) {
       analysis = {
-        score,
+        score: 0,
+        accuracy: "unknown",
         matched_concepts: [],
         missing_concepts: [],
         extra_points: [],
-        accuracy: "Unknown",
         feedback: raw,
       };
     }
 
+    // ===============================
+    // FINAL RESPONSE
+    // ===============================
+
     res.json({
-      score,
       reference,
       tutorText,
       analysis,
